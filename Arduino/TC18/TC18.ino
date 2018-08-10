@@ -235,9 +235,10 @@ void setup() {
   ENC_B_PORT |= _BV(ENC_B);
   ENC_SW_PORT |= _BV(ENC_SW);
   
-  // Enable Pin Change Interrupt 2 for PCINT22 (PD6) [ENC_A], PCINT21 (PD5) [ENC_SW]
+  // Enable Pin Change Interrupt 2 for PCINT22 (PD6) [ENC_A], PCINT23 (PD7) [ENC_B], PCINT21 (PD5) [ENC_SW]
   PCMSK2 |= _BV(PCINT21);
   PCMSK2 |= _BV(PCINT22);
+  PCMSK2 |= _BV(PCINT23);
   PCICR |= _BV(PCIE2);
   
   ds3231_setup();
@@ -465,6 +466,93 @@ ISR(ADC_vect) {
   }
 }
 
+/**
+ * Based on the algorithm described in:
+ * http://www.buxtronix.net/2011/10/rotary-encoders-done-properly.html
+ *
+ * Implements a simple state machine that allows only valid transitions
+ * from state to state. Invalid transitions are ignored, making
+ * debouncing unneeded.
+ *
+ * The encoder, being a quadrature encoder has 4 states per detent.
+ * Since we are only interested in the "full step" state, which happens
+ * once per detent, we only increment our encoder_position during those
+ * transitions. We still keep track of the state and the other
+ * transitions, though, to keep the state machine proceeding.
+ *
+ * The states are:
+ * A B
+ * ---
+ * 0 0
+ * 0 1
+ * 1 1
+ * 1 0
+ *
+ * Since the encoder can turn CW or CCW, the valid next states for
+ * any current state are the one before and the one after, including
+ * wrapping around front to back. In other words, if the encoder is
+ * currently at 00, the next valid states are 01 (CW) or 10 (CCW). Any
+ * other transition is invalid and should be ignored.
+ *
+ * Note that this can be done with clever use of lookup tables, but
+ * I feel the verbose version below is easier to understand.
+ *
+ * The code below is intended to be called any time there is an
+ * interrupt on either of the A or B pins. The encoder_position
+ * variable is updated when appropriate and then an event is
+ * queued when the position changes.
+ */
+static int8_t encoder_read() {
+  static uint8_t state = 0;
+  uint8_t a = (ENC_A_PIN & _BV(ENC_A)) == 0;
+  uint8_t b = (ENC_B_PIN & _BV(ENC_B)) == 0;
+  uint8_t new_state = (a << 1) | b;
+  switch (state) {
+    case 0b00:
+      switch (new_state) {
+        case 0b01:
+          state = new_state;
+          break;
+        case 0b10:
+          state = new_state;
+          return 1;
+      }
+      break;
+    case 0b01:
+      switch (new_state) {
+        case 0b11:
+          state = new_state;
+          break;
+        case 0b00:
+          state = new_state;
+          break;
+      }
+      break;
+    case 0b11:
+      switch (new_state) {
+        case 0b10:
+          state = new_state;
+          break;
+        case 0b01:
+          state = new_state;
+          break;
+      }
+      break;
+    case 0b10:
+      switch (new_state) {
+        case 0b00:
+          state = new_state;
+          return -1;
+          break;
+        case 0b11:
+          state = new_state;
+          break;
+      }
+      break;
+  }
+  return 0;
+}
+
 /*
   Timer fires approx. every 1ms and handles refreshing the VFD,
   debouncing inputs and updating the milliscond time register.
@@ -480,21 +568,13 @@ ISR(TIMER1_OVF_vect) {
   }
   
   if (encoder_debounce == 0) {
-    int encoder_a = (ENC_A_PIN & _BV(ENC_A));
-    int encoder_b = (ENC_B_PIN & _BV(ENC_B));
     int encoder_sw = (ENC_SW_PIN & _BV(ENC_SW));
     
     if (!encoder_sw) {
       encoder_pressed++;
     }
-    
-    if (!encoder_a) {
-      encoder_pos += encoder_b ? -1 : +1;
-    }
-    PCIFR |= _BV(PCIF2);
-    PCICR |= _BV(PCIE2);
   }
-  
+
   vfd_refresh();
 }
 
@@ -503,9 +583,8 @@ ISR(TIMER1_OVF_vect) {
   starts the debounce procedure. 
 */
 ISR(PCINT2_vect) {
-  encoder_debounce = 2;
-  PCICR &= ~(_BV(PCIE2));
-  PCIFR |= _BV(PCIF2);
+  encoder_debounce = 10;
+  encoder_pos -= encoder_read();  
 }
 
 /*
