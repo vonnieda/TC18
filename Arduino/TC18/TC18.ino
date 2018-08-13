@@ -182,6 +182,13 @@ char display_buf[20];
 char display_mode;
 char brightness;
 char bank_mode;
+char glitch_mode;
+
+#define GLITCHES 3
+static int glitch_digit[GLITCHES];
+static int glitch_segment[GLITCHES];
+static int glitch_count[GLITCHES];
+static bool glitch_on[GLITCHES];
 
 void setup() {
   Serial.begin(19200);
@@ -352,6 +359,36 @@ static inline void vfd_refresh() {
   }
   vfd_digit_dwell_count = vfd_digit_dwell[8 - vfd_digit];
   uint32_t d = vfd_data[8 - vfd_digit];
+
+  // glitch mode
+  if (glitch_mode) {
+    for (int i = 0; i < GLITCHES; i++) {
+      if (vfd_digit == glitch_digit[i]) {
+        glitch_count[i]--;
+        if (glitch_count[i] == 0 || !(d & (1 << glitch_segment[i]))) {
+          // chance to pick a new digit
+          if (rand() % 1000 < 1) {
+            glitch_digit[i] = rand() % 9;
+          }
+          // chance to pick a new segment
+          if (rand() % 1000 < 10) {
+            glitch_segment[i] = rand() % 8;
+          }
+          glitch_on[i] = !glitch_on[i];
+          if (glitch_on[i]) {
+            glitch_count[i] = 1 + (rand() % 1000);
+          }
+          else {
+            glitch_count[i] = 1 + (rand() % 15);
+          }
+        }
+        if (!glitch_on[i]) {
+          d &= ~(_BV(glitch_segment[i]));
+        }
+      }
+    }
+  }
+    
   d <<= 9;
   d |= (1 << vfd_digit);
   vfd_send(d);
@@ -666,6 +703,11 @@ void load_config() {
     vfd_digit_dwell[i] = b;
   }
   
+  b = EEPROM.read(20);
+  if (b == 255) {
+    b = 0;
+  }
+  glitch_mode = b;
 }
 
 void save_config() {
@@ -675,6 +717,7 @@ void save_config() {
   for (byte i = 0; i < 9; i++) {
     EEPROM.write(3 + i, vfd_digit_dwell[i]);
   }
+  EEPROM.write(20, glitch_mode);
 }
 
 /*
@@ -913,6 +956,37 @@ void set_bank_mode() {
   bank_mode = orig_bank_mode;
 }
 
+void set_glitch_mode() {
+  char *modes[] = {
+    "Off",
+    "On",
+  };
+  
+  char enc_moved = 0;
+  boolean enc_pressed = 0;
+  
+  char orig_glitch_mode = glitch_mode;
+
+  do {
+    glitch_mode += enc_moved;
+    if (glitch_mode < 0) {
+      glitch_mode = 1;
+    }
+    else if (glitch_mode > 1) {
+      glitch_mode = 0;
+    }
+    if (enc_pressed) {
+      save_config();
+      orig_glitch_mode = glitch_mode;
+      break;
+    }
+    sprintf(display_buf, "Glch %s", modes[glitch_mode]);
+    vfd_set_string(display_buf, 0);
+  } while (wait_for_input(MENU_TIMEOUT, &enc_moved, &enc_pressed));
+  
+  glitch_mode = orig_glitch_mode;
+}
+
 void set_dwell() {
   char enc_moved = 0;
   boolean enc_pressed = 0;
@@ -963,9 +1037,10 @@ void main_menu() {
     "Britenes",
     "Dwell",
     "Bank",
+    "Glitch",
     "Exit",
   };
-  int items_length = 7;
+  int items_length = 8;
   
   int index = 0;
   char enc_moved = 0;
@@ -1001,6 +1076,10 @@ void main_menu() {
       }
       else if (index == 5) {
         set_bank_mode();
+        break;
+      }
+      else if (index == 6) {
+        set_glitch_mode();
         break;
       }
       else {
